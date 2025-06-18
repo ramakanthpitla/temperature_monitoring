@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Temperature Monitoring</title>
+
+  <!-- Chart.js CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+  <!-- Firebase SDK -->
+ <script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/9.6.1/firebase-app.js";
+  import { getDatabase, ref, onValue, set, push, child, remove, get } from "https://www.gstatic.com/firebasejs/9.6.1/firebase-database.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyAc6cGPZf0f2-67TCHB-KCKmX4Rjk2FvZ4",
+    authDomain: "temperature-web-monitoring.firebaseapp.com",
+    databaseURL: "https://temperature-web-monitoring-default-rtdb.asia-southeast1.firebasedatabase.app/",
+    projectId: "temperature-web-monitoring",
+    storageBucket: "temperature-web-monitoring.appspot.com",
+    messagingSenderId: "927052676858",
+    appId: "1:927052676858:web:e4158bc95ac5b5eb7e1343"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const database = getDatabase(app);
+
+  const tempRef = ref(database, "/temperature_data");
+  const thresholdRef = ref(database, "/threshold");
+  const indicatorRef = ref(database, "/indicator");
+  const zscoreRef = ref(database, "/zscore_status");
+  const logRef = ref(database, "/temperature_log");
+
+  let latestTemperature = null;
+  let latestThreshold = null;
+  let latestIndicator = null;
+
+  const temperatureHistory = [];
+  const predictedTemperatureHistory = [];
+  const timeStamps = [];
+
+  const tempChart = new Chart(document.getElementById("tempChart"), {
+    type: "line",
+    data: {
+      labels: timeStamps,
+      datasets: [
+        {
+          label: "Temperature (°C)",
+          data: temperatureHistory,
+          borderColor: "black",
+          fill: false,
+          tension: 0.1
+        },
+        {
+          label: "Predicted Temp (°C)",
+          data: predictedTemperatureHistory,
+          borderColor: "red",
+          fill: false,
+          tension: 0.1
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      scales: {
+        x: {
+          title: { display: true, text: "Timestamp" }
+        },
+        y: {
+          beginAtZero: true,
+          title: { display: true, text: "Temperature (°C)" }
+        }
+      }
+    }
+  });
+
+  function updateThreshold() {
+    const val = document.getElementById("thresholdInput").value;
+    if (val) {
+      set(thresholdRef, parseFloat(val));
+    } else alert("Enter valid threshold.");
+  }
+
+  function updateIndicator() {
+    const val = document.getElementById("indicatorInput").value;
+    if (val) {
+      set(indicatorRef, parseFloat(val));
+    } else alert("Enter valid indicator.");
+  }
+
+  window.updateThreshold = updateThreshold;
+  window.updateIndicator = updateIndicator;
+
+  function updateStatusIndicators(temp, thresholdValue, indicatorValue) {
+    const led = document.getElementById("ledIndicator");
+    const buzzer = document.getElementById("buzzerIndicator");
+
+    led.style.backgroundColor = temp >= indicatorValue ? "red" : "green";
+    led.innerText = temp >= indicatorValue ? "⚠ LED ON (High Temp)" : "✅ LED OFF (Normal)";
+
+    buzzer.style.backgroundColor = temp >= thresholdValue ? "orange" : "green";
+    buzzer.innerText = temp >= thresholdValue ? "🔔 Buzzer ON (Critical Temp)" : "✅ Buzzer OFF (Safe)";
+  }
+
+  function storeLatestTemperature(temp, timestamp) {
+    push(logRef, { temperature: temp, timestamp: timestamp });
+    get(logRef).then(snapshot => {
+      const data = snapshot.val();
+      if (data) {
+        const keys = Object.keys(data);
+        if (keys.length > 30) {
+          const sorted = keys.sort((a, b) => new Date(data[a].timestamp) - new Date(data[b].timestamp));
+          for (let i = 0; i < keys.length - 30; i++) {
+            remove(child(logRef, sorted[i]));
+          }
+        }
+      }
+    });
+  }
+
+  function calculateLinearRegression() {
+    if (temperatureHistory.length < 2) return null;
+    const x = Array.from({ length: temperatureHistory.length }, (_, i) => i);
+    const y = temperatureHistory;
+    const n = x.length;
+    const sumX = x.reduce((a, b) => a + b, 0);
+    const sumY = y.reduce((a, b) => a + b, 0);
+    const sumXY = x.reduce((acc, val, i) => acc + val * y[i], 0);
+    const sumXX = x.reduce((acc, val) => acc + val * val, 0);
+
+    const slope = (n * sumXY - sumX * sumY) / (n * sumXX - sumX * sumX);
+    const intercept = (sumY - slope * sumX) / n;
+
+    return slope * n + intercept;
+  }
+
+  function updatePredictionDisplay(predictedTemp) {
+    const element = document.getElementById("predictionDisplay");
+    if (predictedTemp !== null) {
+      element.innerText = `Predicted Next Temp: ${predictedTemp.toFixed(2)} °C`;
+    } else {
+      element.innerText = "Predicted Next Temp: Not Enough Data";
+    }
+  }
+
+  onValue(tempRef, (snapshot) => {
+    if (snapshot.exists()) {
+      const data = snapshot.val();
+      latestTemperature = data.temperature;
+      const timestamp = data.recorded_time || new Date().toLocaleString();
+
+      document.getElementById("temperature").innerText = `${latestTemperature} °C`;
+      document.getElementById("timestamp").innerText = `Recorded at: ${timestamp}`;
+
+      // Floating box updates
+      document.getElementById("tempBoxValue").innerText = `${latestTemperature} °C`;
+      document.getElementById("d_status").innerText = data.status || "Unknown";
+      
+      const predictedTemp = calculateLinearRegression();
+      document.getElementById("predictedtempValue").innerText =
+        predictedTemp !== null ? `${predictedTemp.toFixed(2)} °C` : "Not Enough Data";
+
+      if (latestThreshold !== null && latestIndicator !== null) {
+        updateStatusIndicators(latestTemperature, latestThreshold, latestIndicator);
+      }
+
+      if (!timeStamps.includes(timestamp)) {
+        timeStamps.push(timestamp);
+        temperatureHistory.push(latestTemperature);
+        predictedTemperatureHistory.push(predictedTemp);
+
+        if (timeStamps.length > 20) {
+          timeStamps.shift();
+          temperatureHistory.shift();
+          predictedTemperatureHistory.shift();
+        }
+
+        tempChart.update();
+        updatePredictionDisplay(predictedTemp);
+      }
+
+      storeLatestTemperature(latestTemperature, timestamp);
+    }
+  });
+
+  onValue(thresholdRef, (snapshot) => {
+    if (snapshot.exists()) {
+      latestThreshold = snapshot.val();
+      document.getElementById("thresholdInput").value = latestThreshold;
+    }
+  });
+
+  onValue(indicatorRef, (snapshot) => {
+    if (snapshot.exists()) {
+      latestIndicator = snapshot.val();
+      document.getElementById("indicatorInput").value = latestIndicator;
+    }
+  });
+
+  onValue(zscoreRef, (snapshot) => {
+    if (snapshot.exists()) {
+      const data = snapshot.val();
+      document.getElementById("zscoreDisplay").innerText = `Z-Score: ${data.zscore.toFixed(2)}`;
+      document.getElementById("zscoreStatus").innerText = `Status: ${data.status}`;
+      document.getElementById("zscoreStatus").style.color = data.status === "ALERT" ? "red" : "darkgreen";
+      document.getElementById("d_status").innerText = data.status || "Unknown";
+    }
+  });
+
+  // Floating box visibility on scroll
+  const target = document.getElementById('timestamp');
+  const box = document.getElementById('myBox');    // current temperature
+  const box1 = document.getElementById('myBox1');  // device status
+  const box2 = document.getElementById('myBox2');  // predicted temp
+
+  window.addEventListener('scroll', () => {
+    const offset = target.getBoundingClientRect().top + window.scrollY;
+    const show = window.scrollY >= offset;
+    box.style.display = show ? 'block' : 'none';
+    box1.style.display = show ? 'block' : 'none';
+    box2.style.display = show ? 'block' : 'none';
+  });
+</script>
+
+  
+
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      text-align: center;
+      margin: 20px;
+    }
+    #temperature {
+      font-size: 24px;
+      font-weight: bold;
+      color: #ff5733;
+    }
+    #timestamp {
+      font-size: 18px;
+      color: #555;
+    }
+    .indicator {
+      width: 250px;
+      padding: 10px;
+      font-size: 18px;
+      font-weight: bold;
+      color: white;
+      margin: 10px;
+      border-radius: 5px;
+    }
+    .input-pair {
+      display: flex;
+      justify-content: center;
+      gap: 10px;
+      margin: 20px;
+    }
+    .input-pair div {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    input, button {
+      margin-top: 5px;
+      padding: 5px;
+    }
+    .status-row {
+      display: flex;
+      justify-content: center;
+      gap: 10px;
+      margin-top: 20px;
+      flex-wrap: nowrap;
+    }
+
+    .box {
+        border-radius: 20px;
+        display: none;
+        position: fixed;
+        top: 220px;
+        left: 20px;
+        width: 150px;
+        height: 100px;
+        background-color: #fff;
+        /*border: 2px solid #333; */
+        padding: 10px;
+        box-shadow: 0px 5px 15px rgba(14, 14, 14, 0.25);
+    }
+    .box1 {
+        border-radius: 20px;
+        display: none;
+        position: fixed;
+        top: 350px;
+        left: 20px;
+        width: 150px;
+        height: 100px;
+        background-color: #fff;
+        /*border: 2px solid #333; */
+        padding: 10px;
+        box-shadow: 0px 5px 15px rgba(14, 14, 14, 0.25);
+    }
+    .box2 {
+        border-radius: 20px;
+        display: none;
+        position: fixed;
+        top: 480px;
+        left: 20px;
+        width: 150px;
+        height: 100px;
+        background-color: #fff;
+        /*border: 2px solid #333; */
+        padding: 10px;
+        box-shadow: 0px 5px 15px rgba(14, 14, 14, 0.25);
+    }
+
+    #tempChart {
+      width: 70vw;
+      height: 400px !important;
+      margin: 40px auto;
+    }
+  </style>
+</head>
+
+<body>
+  <h1>Real-Time Temperature Monitoring</h1>
+  <p>Current Temperature:</p>
+  <p id="temperature">Loading...</p>
+  <p id="timestamp">Recorded at: Loading...</p>
+
+  <h2>Set Threshold & Indicator Values</h2>
+  <div class="input-pair">
+    <div>
+      <label for="thresholdInput">Threshold (°C)</label>
+      <input type="number" id="thresholdInput" placeholder="Threshold °C" />
+      <button onclick="updateThreshold()">Set Threshold</button>
+    </div>
+    <div>
+      <label for="indicatorInput">Indicator (°C)</label>
+      <input type="number" id="indicatorInput" placeholder="Indicator °C" />
+      <button onclick="updateIndicator()">Set Indicator</button>
+    </div>
+  </div>
+
+  <h2>Temperature Status</h2>
+  <div class="status-row">
+    <div id="buzzerIndicator" class="indicator" style="background-color: green;">✅ Buzzer OFF (Safe)</div>
+    <div id="ledIndicator" class="indicator" style="background-color: green;">✅ LED OFF (Normal)</div>
+  </div>
+
+  <div class="box" id="myBox">
+    <p>Current Temperature:</p>
+    <p id="tempBoxValue">Loading...</p>
+  </div>
+
+  <h2>Temperature Analytics</h2>
+  <canvas id="tempChart" width="400" height="200"></canvas>
+
+  <h2>Z-Score Analysis</h2>
+  <p id="zscoreDisplay">Z-Score: Loading...</p>
+  <p id="zscoreStatus">Status: Loading...</p>
+
+  <h2>Next Temperature Prediction</h2>
+  <p id="predictionDisplay">Predicted Next Temp: Loading...</p>
+
+  <div class="box1" id="myBox1">
+    <p>Device status:</p>
+    <p id="d_status">Loading...</p>
+  </div>
+  <div class="box2" id="myBox2">
+    <p>Next predicted Temperature:</p>
+    <p id="predictedtempValue">Loading...</p>
+  </div>
+
+</body>
+</html>
